@@ -293,9 +293,34 @@ tr.expand-row > td {
 .tag-ok { background: var(--ok-soft); border-color: #bfdccc; color: var(--ok); }
 .tag-warn { background: var(--accent-soft); border-color: #f0d3b1; color: var(--accent); }
 .tag-danger { background: var(--danger-soft); border-color: #e8c2bd; color: var(--danger); }
+/* 手工替代：紫棕，区别于自动（中性）、补录（橙）、缺口（红） */
+.tag-manual { background: #efe9f6; border-color: #d3c4e6; color: #6b46a0; }
+.num-manual { color: #6b46a0; font-weight: 600; }
+/* 缺口：红字描边徽章 */
+.tag-gap { background: repeating-linear-gradient(45deg, #fff, #fff 4px, #f8e6e3 4px, #f8e6e3 8px); border-color: #e8c2bd; color: var(--danger); }
 .num-ok { color: var(--ok); }
 .num-danger { color: var(--danger); font-weight: 600; }
 .num-warn { color: var(--accent); }
+
+/* 行级语义底色：手工替代淡紫、无效淡红、缺口斜纹 */
+tbody tr.row-manual > td { background: #f6f1fb; }
+tbody tr.row-manual:hover > td { background: #efe6f8; }
+tbody tr.row-invalid > td { background: var(--danger-soft); }
+tbody tr.row-gap > td {
+  background: repeating-linear-gradient(45deg, #fffdfa, #fffdfa 6px, #f6e7e4 6px, #f6e7e4 12px);
+}
+tbody tr.row-gap:hover > td { background: #fbeae7; }
+
+/* 替代取证页缺口清单 */
+.gap-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.gap-item {
+  border: 1px dashed var(--danger);
+  background: #fdf3f2;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.gap-title { margin: 14px 0 4px; font-size: 13px; color: var(--ink); }
 
 /* ---------- 弹层 ---------- */
 .modal-mask {

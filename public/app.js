@@ -12,7 +12,10 @@
   var DEVICE_STATUS = ['正常', '校准', '维护', '故障'];
   var FLAGS = ['有效', '无效'];
   var SOURCES = ['自动', '补录'];
+  var READING_SOURCE_FILTER = ['自动', '补录', '手工'];
   var REPORT_STATUS = ['草稿', '已上报', '退回'];
+  var OUTAGE_TYPES = ['故障', '送检'];
+  var MANUAL_STATUS = ['待复核', '已复核', '驳回'];
 
   /* ================= 全局状态 ================= */
   var state = {
@@ -29,7 +32,8 @@
     plantsFilter: { status: '', keyword: '' },
     outletsFilter: { plantId: '', status: '' },
     devicesFilter: { outletId: '', metric: '', status: '' },
-    readingsFilter: { outletId: '', deviceId: '', metric: '', day: '', month: '' },
+    readingsFilter: { outletId: '', deviceId: '', metric: '', day: '', month: '', source: '' },
+    manualFilter: { outletId: '', month: '', status: '' },
     accounting: { outletId: '', month: '', metric: 'COD' }
   };
 
@@ -290,6 +294,19 @@
     return h('span', { class: 'tag ' + cls, text: status });
   }
 
+  // 数据来源徽章：自动=中性、补录=橙、手工替代=紫（特殊语义）、缺口=红边
+  function sourceTag(source) {
+    if (source === '自动') return h('span', { class: 'tag', text: '自动' });
+    if (source === '补录') return h('span', { class: 'tag tag-warn', text: '补录' });
+    if (source === '手工') return h('span', { class: 'tag tag-manual', text: '手工替代' });
+    return h('span', { class: 'tag tag-danger', text: source || '缺口' });
+  }
+  function reviewTag(status) {
+    if (status === '已复核') return h('span', { class: 'tag tag-ok', text: '已复核' });
+    if (status === '驳回') return h('span', { class: 'tag tag-danger', text: '驳回' });
+    return h('span', { class: 'tag tag-warn', text: status || '待复核' });
+  }
+
   /* ================= 数据加载 ================= */
   async function loadAll() {
     var res = await Promise.all([
@@ -346,6 +363,7 @@
     else if (view === 'plants') renderPlants();
     else if (view === 'devices') renderDevices();
     else if (view === 'readings') renderReadings();
+    else if (view === 'manual') renderManual();
     else if (view === 'accounting') renderAccounting();
   }
 
@@ -380,6 +398,8 @@
       metricCard('排放口', s.outletCount, '运行中 ' + s.runningOutletCount + ' 个', 'plants'),
       metricCard('在线设备', s.deviceCount, dsText, 'devices'),
       metricCard('监测数据', s.readingCount, '自动 ' + s.autoCount + ' · 补录 ' + s.imputedCount + ' · 无效标记 ' + s.invalidFlagCount, 'readings'),
+      metricCard('替代取证', (s.manualCount || 0) + ' 条手工', '已复核 ' + (s.reviewedManualCount || 0) + ' · 待复核 ' + (s.pendingManualCount || 0) + ' · 故障/送检 ' + (s.outageCount || 0) + ' 段', 'manual'),
+      metricCard('本月缺口', (s.gapHours || 0) + ' 小时', '其中手工替代覆盖 ' + (s.manualHours || 0) + ' 小时（COD/氨氮合计）', 'manual'),
       metricCard('报表', s.reportCount, '已上报 ' + s.submittedReportCount + ' 张', 'accounting'),
       metricCard('超标排放口', s.exceededOutletCount, '存在月超标判定', 'accounting'),
       metricCard('年累计 COD', s.accumulatedCodTons + ' 吨', '年许可量 ' + s.permitCodTons + ' 吨', 'accounting'),
@@ -742,35 +762,74 @@
   /* ================= 监测数据 ================= */
   function readingRow(r) {
     var pc = pageConcentration(r);
-    var actions = actionsCell([
-      actionBtn('修改', function () { openReadingForm(r); }),
-      deleteBtn('删除', function () {
-        return api('DELETE', '/api/readings/' + r.id).then(function () { return afterMutation('已删除监测数据 ' + r.id); });
-      })
-    ]);
-    return expandableRow([
+    var isManual = r.rowType === 'manual';
+    var actions;
+    if (isManual) {
+      actions = actionsCell([
+        actionBtn('替代取证', function () {
+          state.manualFilter.outletId = r.outletId;
+          state.manualFilter.month = r.at.slice(0, 7);
+          switchView('manual');
+        })
+      ]);
+    } else {
+      actions = actionsCell([
+        actionBtn('修改', function () { openReadingForm(r); }),
+        deleteBtn('删除', function () {
+          return api('DELETE', '/api/readings/' + r.id).then(function () { return afterMutation('已删除监测数据 ' + r.id); });
+        })
+      ]);
+    }
+    var tr = expandableRow([
       h('td', { text: textOf(r.outletCode) }),
       h('td', { text: textOf(r.deviceCode) }),
       h('td', { text: r.metric }),
       h('td', { class: 'nowrap', text: r.at }),
-      h('td', { class: 'mono', text: textOf(r.value) }),
+      h('td', { class: 'mono', text: textOf(r.value) + (isManual && r.unit ? ' ' + r.unit : '') }),
       h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
-      h('td', { text: r.source }),
+      h('td', {}, sourceTag(r.source)),
       h('td', { text: textOf(r.operator) }),
-      h('td', {}, h('span', { class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'), text: r.counted ? '计入' : '不计入' })),
+      h('td', {}, h('span', {
+        class: 'tag ' + (r.counted ? 'tag-ok' : (isManual ? 'tag-warn' : 'tag-danger')),
+        text: r.counted ? '计入' : '不计入'
+      })),
       h('td', { class: 'mono cell-page-conc', dataset: { value: pc === null ? '' : String(pc) }, text: pc === null ? '—' : fmt(pc, 2) }),
       h('td', { class: 'mono cell-api-conc', dataset: { value: (r.concentration === null || r.concentration === undefined) ? '' : String(r.concentration) }, text: textOf(r.concentration) }),
       h('td', { class: 'mono', text: textOf(r.oxygen) }),
-      h('td', { class: 'mono', text: textOf(r.flow) }),
+      h('td', { class: 'mono', text: (r.flow === null || r.flow === undefined) ? '—' : textOf(r.flow) }),
       actions
     ], function () {
-      return h('div', { class: 'detail-grid' }, [
-        h('div', { class: 'detail-block' }, [h('h3', { text: '数据 ID' }), h('div', { text: r.id })]),
+      var blocks = [
+        h('div', { class: 'detail-block' }, [h('h3', { text: '数据 ID' }), h('div', { text: r.id + (isManual ? '（手工登记）' : '') })]),
         h('div', { class: 'detail-block' }, [h('h3', { text: '设备状态' }), h('div', { text: textOf(r.deviceStatus) })]),
-        h('div', { class: 'detail-block' }, [h('h3', { text: '备注' }), h('div', { text: textOf(r.remark) })])
-      ]);
+        h('div', { class: 'detail-block' }, [
+          h('h3', { text: r.counted ? '计入依据' : '不计入原因' }),
+          h('div', { class: r.counted ? 'num-ok' : 'num-danger', text: r.counted ? '满足口径，计入统计' : textOf(r.invalidReason) })
+        ])
+      ];
+      if (isManual) {
+        blocks.push(h('div', { class: 'detail-block' }, [
+          h('h3', { text: '手工监测取证' }),
+          h('div', {}, [
+            h('div', { text: '采样时刻：' + r.at }),
+            h('div', { text: '监测方法：' + textOf(r.method) }),
+            h('div', { text: '检出限：' + textOf(r.detectionLimit) }),
+            h('div', { text: '监测单位：' + textOf(r.unit) }),
+            h('div', { text: '登记人：' + textOf(r.operator) }),
+            h('div', { text: '复核人：' + textOf(r.reviewer) }),
+            h('div', {}, ['复核状态：', reviewTag(r.status)]),
+            h('div', { text: '复核意见：' + textOf(r.reviewNote) })
+          ])
+        ]));
+      }
+      blocks.push(h('div', { class: 'detail-block' }, [h('h3', { text: '备注' }), h('div', { text: textOf(r.remark) })]));
+      return h('div', { class: 'detail-grid' }, blocks);
     });
+    if (isManual) tr.classList.add('row-manual');
+    else if (!r.counted) tr.classList.add('row-invalid');
+    return tr;
   }
+
 
   async function renderReadings() {
     var f = clear(document.getElementById('filters-readings'));
@@ -789,6 +848,7 @@
     var deviceSel = sel([{ value: '', label: '全部设备' }].concat(devPool.map(function (d) { return { value: d.id, label: d.code }; })),
       state.readingsFilter.deviceId, function (v) { state.readingsFilter.deviceId = v; renderReadings(); });
     var metricSel = sel(optsFromList(METRICS), state.readingsFilter.metric, function (v) { state.readingsFilter.metric = v; renderReadings(); });
+    var sourceSel = sel(optsFromList(READING_SOURCE_FILTER), state.readingsFilter.source, function (v) { state.readingsFilter.source = v; renderReadings(); });
     var dayInput = h('input', { type: 'date' });
     dayInput.value = state.readingsFilter.day;
     dayInput.addEventListener('change', function () { state.readingsFilter.day = dayInput.value; renderReadings(); });
@@ -801,10 +861,11 @@
       h('div', { class: 'field' }, [h('label', { text: '排放口' }), outletSel]),
       h('div', { class: 'field' }, [h('label', { text: '设备' }), deviceSel]),
       h('div', { class: 'field' }, [h('label', { text: '指标' }), metricSel]),
+      h('div', { class: 'field' }, [h('label', { text: '来源' }), sourceSel]),
       h('div', { class: 'field' }, [h('label', { text: '日期' }), dayInput]),
       h('div', { class: 'field' }, [h('label', { text: '月份' }), monthInput]),
       h('div', { class: 'field' }, [h('button', { type: 'button', class: 'btn btn-sm btn-ghost', text: '清空筛选', onclick: function () {
-        state.readingsFilter = { outletId: '', deviceId: '', metric: '', day: '', month: '' };
+        state.readingsFilter = { outletId: '', deviceId: '', metric: '', source: '', day: '', month: '' };
         renderReadings();
       } })])
     ]));
@@ -831,6 +892,10 @@
         ]),
         h('div', { class: 'section-note' }, [
           '「折算后浓度（页面自算）」由本页按 实测 × (21 − 基准氧) / (21 − 氧含量) 计算，氧含量取接口 oxygen，缺失按 0 代入；「接口折算浓度」直接显示接口 concentration。'
+        ]),
+        h('div', { class: 'section-note' }, [
+          h('span', { class: 'tag tag-manual', text: '手工替代' }),
+          ' 行是设备故障/送检期间登记、经复核入账的手工监测等效值；灰红字行是因标记、设备状态、量程或停产停用被判定不计入的读数；手工行点「替代取证」可查看依据与复核信息。'
         ]),
         h('div', { class: 'table-wrap' }, h('table', { id: 'tableReadings' }, [
           h('thead', {}, h('tr', {}, [
@@ -888,6 +953,289 @@
     ]);
   }
 
+  /* ================= 替代取证 ================= */
+  function outageRow(o) {
+    var actions = actionsCell([
+      actionBtn('修改', function () { openOutageForm(o); }),
+      deleteBtn('删除', function () {
+        return api('DELETE', '/api/outages/' + o.id).then(function () { afterMutation('已删除故障/送检登记 ' + o.id); });
+      })
+    ]);
+    return h('tr', { class: 'row' }, [
+      h('td', {}, h('b', { text: o.deviceCode })),
+      h('td', { text: textOf(o.outletCode) }),
+      h('td', { text: textOf(o.deviceMetric) }),
+      h('td', {}, statusTag(o.reasonType, '正常')),
+      h('td', { class: 'nowrap', text: o.startAt }),
+      h('td', { class: 'nowrap', text: o.endAt }),
+      h('td', { class: 'mono', text: textOf(o.hours) }),
+      h('td', { text: textOf(o.ticketNo) }),
+      h('td', { text: textOf(o.agency) }),
+      h('td', { class: 'mono' + (o.pendingManualCount > 0 ? ' num-warn' : ''), text: (o.reviewedManualCount || 0) + ' 已复核 / ' + (o.pendingManualCount || 0) + ' 待复核' }),
+      h('td', { text: textOf(o.operator) }),
+      actions
+    ]);
+  }
+
+  function openOutageForm(o) {
+    var fields = [
+      { name: 'deviceId', label: '设备（编号/指标/排放口）', type: 'select', options: state.devices.map(function (d) {
+        var ol = state.outlets.filter(function (x) { return x.id === d.outletId; })[0];
+        return { value: d.id, label: d.code + '（' + d.metric + '·' + (ol ? ol.code : '') + '）' };
+      }) },
+      { name: 'reasonType', label: '离位原因', type: 'select', options: OUTAGE_TYPES },
+      { name: 'startAt', label: '起始时刻（YYYY-MM-DD HH:00:00）' },
+      { name: 'endAt', label: '结束时刻（YYYY-MM-DD HH:00:00）' },
+      { name: 'ticketNo', label: '故障/检修单号' },
+      { name: 'agency', label: '送检/校准机构' },
+      { name: 'operator', label: '登记人' },
+      { name: 'remark', label: '备注', full: true }
+    ];
+    var form = buildForm(fields, o || {
+      deviceId: state.devices.length ? state.devices[0].id : '',
+      reasonType: '故障', startAt: (state.month || '2026-09') + '-01 08:00:00', endAt: (state.month || '2026-09') + '-01 20:00:00'
+    });
+    var save = h('button', { type: 'button', class: 'btn btn-accent', text: '保存' });
+    save.addEventListener('click', function () {
+      var payload = collectForm(form);
+      var p = o ? api('PATCH', '/api/outages/' + o.id, payload) : api('POST', '/api/outages', payload);
+      Promise.resolve(p).then(function () { closeModal(); return afterMutation(o ? '故障/送检登记已修改' : '故障/送检时段已登记'); }).catch(showError);
+    });
+    openModal(o ? '修改故障/送检登记' : '登记设备故障/送检时段', form, [
+      h('button', { type: 'button', class: 'btn btn-ghost', text: '取消', onclick: closeModal }), save
+    ]);
+  }
+
+  function manualRow(m) {
+    var btns = [];
+    if (m.status === '待复核' || m.status === '驳回') {
+      btns.push(actionBtn('修改', function () { openManualForm(m); }));
+      btns.push(deleteBtn('删除', function () {
+        return api('DELETE', '/api/manual-readings/' + m.id).then(function () { afterMutation('已删除手工登记 ' + m.id); });
+      }));
+    }
+    if (m.status !== '已复核') btns.push(actionBtn('复核', function () { openReviewForm(m); }));
+    else btns.push(actionBtn('驳回更正', function () { openReviewForm(m); }));
+    var actions = actionsCell(btns);
+    return h('tr', { class: 'row row-manual' }, [
+      h('td', { class: 'nowrap', text: m.at }),
+      h('td', { text: textOf(m.deviceCode) }),
+      h('td', { text: m.metric }),
+      h('td', { class: 'mono', text: fmt(m.value, 3) + ' ' + textOf(m.unit) }),
+      h('td', { text: textOf(m.method) }),
+      h('td', { class: 'mono', text: textOf(m.detectionLimit) }),
+      h('td', { text: textOf(m.operator) }),
+      h('td', { text: textOf(m.reviewer) }),
+      h('td', {}, reviewTag(m.status)),
+      h('td', { class: m.counted ? 'num-ok' : 'num-danger', text: m.counted ? '已入账' : textOf(m.dropReason || '待复核') }),
+      actions
+    ]);
+  }
+
+  function openManualForm(m) {
+    var fields = [
+      { name: 'deviceId', label: '设备（必须处于已登记的故障/送检时段）', type: 'select', options: state.devices.map(function (d) {
+        var ol = state.outlets.filter(function (x) { return x.id === d.outletId; })[0];
+        return { value: d.id, label: d.code + '（' + d.metric + '·' + (ol ? ol.code : '') + '）' };
+      }) },
+      { name: 'metric', label: '监测指标', type: 'select', options: METRICS },
+      { name: 'at', label: '采样时刻（YYYY-MM-DD HH:00:00）' },
+      { name: 'value', label: '监测值', type: 'number' },
+      { name: 'method', label: '监测方法（如 HJ 828 重铬酸盐法）' },
+      { name: 'detectionLimit', label: '检出限', type: 'number' },
+      { name: 'unit', label: '监测单位（mg/L、m³/h 等）' },
+      { name: 'operator', label: '登记人' },
+      { name: 'remark', label: '备注', full: true }
+    ];
+    var form = buildForm(fields, m || {
+      deviceId: state.devices.length ? state.devices[0].id : '',
+      metric: 'COD', at: (state.manualFilter.month || state.month || '2026-09') + '-01 08:00:00',
+      value: '', method: '', detectionLimit: '', unit: 'mg/L', operator: '', remark: ''
+    });
+    var tip = h('div', { class: 'section-note', text: '硬口径：采样时刻必须落在该设备已登记的故障/送检时段内；监测方法、检出限、监测单位、登记人为必填，缺一项不许入账；登记后必须由复核人复核通过才参与平均与总量。' });
+    var grid = form;
+    var wrap = h('div', null, [tip, grid]);
+    var save = h('button', { type: 'button', class: 'btn btn-accent', text: '保存登记' });
+    save.addEventListener('click', function () {
+      var raw = collectForm(form);
+      var payload = {
+        deviceId: raw.deviceId, metric: raw.metric, at: raw.at,
+        value: raw.value === '' ? undefined : Number(raw.value),
+        method: raw.method, detectionLimit: raw.detectionLimit === '' ? undefined : Number(raw.detectionLimit),
+        unit: raw.unit, operator: raw.operator, remark: raw.remark
+      };
+      var p = m ? api('PATCH', '/api/manual-readings/' + m.id, payload) : api('POST', '/api/manual-readings', payload);
+      Promise.resolve(p).then(function () { closeModal(); return afterMutation(m ? '手工登记已修改（仍待复核）' : '手工监测已登记，等待复核'); }).catch(showError);
+    });
+    openModal(m ? '修改手工监测登记' : '登记手工监测（设备故障/送检期间等效值）', wrap, [
+      h('button', { type: 'button', class: 'btn btn-ghost', text: '取消', onclick: closeModal }), save
+    ]);
+  }
+
+  function openReviewForm(m) {
+    var fields = [
+      { name: 'action', label: '复核结论', type: 'select', options: [{ value: '通过', label: '通过（入账为等效值）' }, { value: '驳回', label: '驳回（不参与统计）' }] },
+      { name: 'reviewer', label: '复核人（必填）' },
+      { name: 'reviewNote', label: '复核意见', full: true }
+    ];
+    var form = buildForm(fields, { action: m.status === '已复核' ? '驳回' : '通过', reviewer: m.reviewer || '', reviewNote: m.reviewNote || '' });
+    var info = h('div', { class: 'section-note' }, [
+      m.at + ' · ' + (m.deviceCode || '') + ' · ' + m.metric + ' · 监测值 ' + m.value + ' ' + m.unit,
+      h('br'), '方法：' + m.method + '；检出限：' + m.detectionLimit + '；登记人：' + m.operator
+    ]);
+    var wrap = h('div', null, [info, form]);
+    var save = h('button', { type: 'button', class: 'btn btn-accent', text: '提交复核' });
+    save.addEventListener('click', function () {
+      var payload = collectForm(form);
+      api('POST', '/api/manual-readings/' + m.id + '/review', payload).then(function () {
+        closeModal(); return afterMutation('复核完成：' + payload.action);
+      }).catch(showError);
+    });
+    openModal('复核手工监测数据', wrap, [
+      h('button', { type: 'button', class: 'btn btn-ghost', text: '取消', onclick: closeModal }), save
+    ]);
+  }
+
+  function coverageCard(cov) {
+    var st = cov.settings || {};
+    var head = h('div', { class: 'card-head' }, [
+      h('h2', { text: '替代边界与缺口（按口径自动判定）' }),
+      h('span', { class: 'sub', text: cov.month + ' · 单次故障/送检最多替代 ' + st.maxManualSpanHours + ' 小时 · 每日至少 ' + st.manualMinSamplesPerDay + ' 次手工监测 · 单月替代比例上限 ' + Math.round(Number(st.manualMaxCoverageRatio) * 100) + '%' })
+    ]);
+    var tb = h('tbody');
+    (cov.metrics || []).forEach(function (m) {
+      var ratioPct = Math.round(Number(m.manualCoverageRatio) * 1000) / 10;
+      var overCap = m.manualHours > m.manualCapHours;
+      tb.appendChild(h('tr', { class: 'row' }, [
+        h('td', { text: m.metric }),
+        h('td', { class: 'mono', text: String(m.expectedHours) }),
+        h('td', { class: 'mono', text: String(m.autoHours) }),
+        h('td', { class: 'mono num-warn', text: String(m.imputedHours) }),
+        h('td', { class: 'mono num-manual', text: String(m.manualHours) }),
+        h('td', { class: 'mono num-danger', text: String(m.invalidHours) }),
+        h('td', { class: 'mono num-danger', text: String(m.gapHours) }),
+        h('td', { class: 'mono' + (overCap ? ' num-danger' : ''), text: ratioPct + '%（上限 ' + m.manualCapHours + 'h）' }),
+        h('td', { class: 'mono', text: fmt(m.autoTons, 4) }),
+        h('td', { class: 'mono num-warn', text: fmt(m.imputedTons, 4) }),
+        h('td', { class: 'mono num-manual', text: fmt(m.manualTons, 4) }),
+        h('td', { class: 'mono', text: fmt(m.tons, 4) })
+      ]));
+    });
+    var table = h('table', { class: 'mini-table' }, [
+      h('thead', {}, h('tr', {}, [
+        h('th', { text: '指标' }), h('th', { text: '应监测h' }), h('th', { text: '自动h' }),
+        h('th', { text: '补录h' }), h('th', { text: '手工替代h' }), h('th', { text: '无效h' }), h('th', { text: '缺口h' }),
+        h('th', { text: '替代占比' }), h('th', { text: '总量-自动(吨)' }),
+        h('th', { text: '总量-补录(吨)' }), h('th', { text: '总量-手工(吨)' }), h('th', { text: '总量合计(吨)' })
+      ])),
+      tb
+    ]);
+
+    var gapBox = h('div', { class: 'gap-list' });
+    var hasGap = false;
+    (cov.metrics || []).forEach(function (m) {
+      (m.gaps || []).forEach(function (g) {
+        hasGap = true;
+        var cut = (g.droppedManual || []).length;
+        gapBox.appendChild(h('div', { class: 'gap-item' }, [
+          h('b', { text: m.metric + ' 缺口 ' }),
+          h('span', { class: 'nowrap mono', text: g.startAt + ' ～ ' + g.endAt }),
+          ' ', h('span', { class: 'num-danger', text: g.hours + ' 小时' }),
+          cut ? h('span', { class: 'num-warn', text: '（其中 ' + cut + ' 个小时有手工登记但超出口径，已按缺口处理：' + (g.droppedManual[0] || {}).reason + '）' })
+            : h('span', { class: 'hint', text: '（该时段没有任何有效数据，按缺口处理，不用替代数据填平）' })
+        ]));
+      });
+    });
+    if (!hasGap) gapBox.appendChild(h('div', { class: 'empty num-ok', text: '本月各指标均无缺口。' }));
+
+    return h('div', { class: 'card' }, [head, h('div', { class: 'card-body' }, [
+      h('div', { class: 'table-wrap' }, table),
+      h('div', { class: 'section-note', text: '总量按同一时刻的浓度×流量逐小时配对累加；替代期间浓度取手工值、流量取同时刻有效流量（自动优先，其次经复核手工流量；缺有效流量的小时不估、不计，并计入缺口）。' }),
+      h('h3', { class: 'gap-title', text: '缺口时段（显式标出，不计入平均与总量）' }),
+      gapBox
+    ])]);
+  }
+
+  async function renderManual() {
+    if (!state.manualFilter.outletId && state.outlets.length) state.manualFilter.outletId = state.outlets[0].id;
+    if (!state.manualFilter.month) state.manualFilter.month = state.month;
+
+    var f = clear(document.getElementById('filters-manual'));
+    f.appendChild(h('div', { class: 'filter-box' }, [
+      h('div', { class: 'filter-title', text: '替代取证' }),
+      h('div', { class: 'field' }, [h('label', { text: '排放口' }),
+        sel(state.outlets.map(function (o) { return { value: o.id, label: o.code + ' ' + o.name }; }),
+          state.manualFilter.outletId, function (v) { state.manualFilter.outletId = v; renderManual(); })]),
+      h('div', { class: 'field' }, [h('label', { text: '月份' }),
+        (function () {
+          var mi = h('input', { type: 'month' });
+          mi.value = state.manualFilter.month;
+          mi.addEventListener('change', function () { state.manualFilter.month = mi.value; renderManual(); });
+          return mi;
+        })()]),
+      h('div', { class: 'field' }, [h('label', { text: '复核状态' }),
+        sel(optsFromList(MANUAL_STATUS), state.manualFilter.status, function (v) { state.manualFilter.status = v; renderManual(); })])
+    ]));
+
+    var c = clear(document.getElementById('content-manual'));
+    if (!state.manualFilter.outletId) { c.appendChild(h('div', { class: 'empty', text: '没有可选排放口' })); return; }
+    var oid = state.manualFilter.outletId;
+    var month = state.manualFilter.month;
+
+    var cov, outages, manuals;
+    try {
+      var out = await Promise.all([
+        api('GET', '/api/outlets/' + oid + '/coverage' + qs({ month: month })),
+        api('GET', '/api/outages' + qs({ outletId: oid })),
+        api('GET', '/api/manual-readings' + qs({ outletId: oid, month: month, status: state.manualFilter.status }))
+      ]);
+      cov = out[0]; outages = out[1]; manuals = out[2];
+    } catch (e) { showError(e); c.appendChild(h('div', { class: 'empty', text: '加载失败：' + e.message })); return; }
+
+    c.appendChild(coverageCard(cov));
+
+    var otTb = h('tbody');
+    outages.forEach(function (o) { otTb.appendChild(outageRow(o)); });
+    c.appendChild(h('div', { class: 'card' }, [
+      h('div', { class: 'card-head' }, [
+        h('h2', { text: '设备故障 / 送检台账' }),
+        h('div', { class: 'btn-row' }, [
+          h('span', { class: 'sub', text: '共 ' + outages.length + ' 段（手工监测登记的唯一依据）' }),
+          h('button', { type: 'button', class: 'btn btn-sm btn-accent', text: '登记故障/送检', onclick: function () { openOutageForm(null); } })
+        ])
+      ]),
+      h('div', { class: 'table-wrap' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, [
+          h('th', { text: '设备' }), h('th', { text: '排放口' }), h('th', { text: '指标' }), h('th', { text: '原因' }),
+          h('th', { text: '起始时刻' }), h('th', { text: '结束时刻' }), h('th', { text: '小时数' }),
+          h('th', { text: '单号' }), h('th', { text: '机构' }), h('th', { text: '手工登记' }), h('th', { text: '登记人' }), h('th', { text: '操作' })
+        ])),
+        otTb
+      ]))
+    ]));
+
+    var mnTb = h('tbody');
+    manuals.forEach(function (m) { mnTb.appendChild(manualRow(m)); });
+    c.appendChild(h('div', { class: 'card' }, [
+      h('div', { class: 'card-head' }, [
+        h('h2', { text: '手工监测登记（等效值）' }),
+        h('div', { class: 'btn-row' }, [
+          h('span', { class: 'sub', text: '共 ' + manuals.length + ' 条（缺依据或缺方法/检出限/单位/登记人的不许入账）' }),
+          h('button', { type: 'button', class: 'btn btn-sm btn-accent', text: '登记手工监测', onclick: function () { openManualForm(null); } })
+        ])
+      ]),
+      h('div', { class: 'table-wrap' }, h('table', {}, [
+        h('thead', {}, h('tr', {}, [
+          h('th', { text: '采样时刻' }), h('th', { text: '设备' }), h('th', { text: '指标' }),
+          h('th', { text: '监测值' }), h('th', { text: '监测方法' }), h('th', { text: '检出限' }),
+          h('th', { text: '登记人' }), h('th', { text: '复核人' }), h('th', { text: '复核状态' }),
+          h('th', { text: '入账情况' }), h('th', { text: '操作' })
+        ])),
+        mnTb
+      ]))
+    ]));
+  }
+
   /* ================= 核算与报表 ================= */
   function summaryCard(sum, metric) {
     var row = metricOf(sum.rows, metric);
@@ -895,12 +1243,20 @@
     var cells = [
       ['月均', fmt(row.monthAverage)],
       ['月总量(吨)', fmt(row.monthTotalTons, 4)],
+      ['其中自动(吨)', fmt(row.autoTons, 4)],
+      ['其中补录(吨)', fmt(row.imputedTons, 4)],
+      ['其中手工替代(吨)', fmt(row.manualTons, 4)],
+      ['手工替代小时', textOf(row.manualHours)],
+      ['无效小时', textOf(row.invalidHours)],
+      ['缺口小时', textOf(row.gapHours)],
+      ['替代占比', Math.round(Number(row.manualCoverageRatio || 0) * 1000) / 10 + '%'],
       ['季度总量 COD(吨)', fmt(sum.quarterTotalCod, 4)],
       ['季度许可量 COD(吨)', fmt(sum.permitCodTons, 4)],
       ['年累计 COD(吨)', fmt(sum.accumulatedCodTons, 4)],
       ['年许可量 COD(吨)', fmt(sum.annualPermitCodTons, 4)],
       ['超标天数', textOf(row.exceedDaysCount)],
       ['超标小时数', textOf(row.exceedHours)],
+      ['小时超标判定', row.hourlyExceed ? '小时超标成立' : '小时超标不成立'],
       ['限值', textOf(row.limit)],
       ['超标判定', row.exceeded ? '超标' : '达标'],
       ['年累计氨氮(吨)', fmt(sum.accumulatedAmmoniaTons, 4)],
@@ -918,45 +1274,68 @@
     return grid;
   }
 
+  function stateTag(s) {
+    if (s.state === 'auto') return h('span', { class: 'tag', text: '自动' });
+    if (s.state === 'imputed') return h('span', { class: 'tag tag-warn', text: '补录' });
+    if (s.state === 'manual') return h('span', { class: 'tag tag-manual', text: '手工替代' });
+    if (s.state === 'invalid') return h('span', { class: 'tag tag-danger', text: '无效' });
+    return h('span', { class: 'tag tag-gap', text: '缺口' });
+  }
+
   function hourlyTable(rows) {
     var tb = h('tbody');
     (rows || []).forEach(function (r) {
-      tb.appendChild(h('tr', { class: 'row' }, [
+      var tr = h('tr', { class: 'row' + (r.state === 'gap' ? ' row-gap' : (r.state === 'manual' ? ' row-manual' : (r.state === 'invalid' ? ' row-invalid' : ''))) }, [
         h('td', { class: 'nowrap', text: r.at }),
         h('td', { class: 'mono', text: textOf(r.hour) }),
-        h('td', { class: 'mono', text: textOf(r.value) }),
-        h('td', { text: r.source }),
+        h('td', { class: 'mono', text: r.value === null || r.value === undefined ? '—' : textOf(r.value) }),
+        h('td', {}, stateTag(r)),
         h('td', {}, h('span', { class: 'tag ' + (r.flag === '有效' ? 'tag-ok' : 'tag-danger'), text: r.flag })),
         h('td', { text: textOf(r.deviceCode) }),
-        h('td', {}, statusTag(r.deviceStatus, '正常')),
-        h('td', { class: 'mono', text: textOf(r.oxygen) }),
-        h('td', { class: 'mono', text: textOf(r.flow) }),
-        h('td', { text: r.counted ? '计入' : '不计入' }),
-        h('td', { class: 'mono', text: textOf(r.concentration) })
-      ]));
+        h('td', {}, r.deviceStatus ? statusTag(r.deviceStatus, '正常') : h('span', { class: 'hint', text: '—' })),
+        h('td', { class: 'mono', text: r.oxygen === null || r.oxygen === undefined ? '—' : textOf(r.oxygen) }),
+        h('td', { class: 'mono', text: r.flow === null || r.flow === undefined ? '—' : textOf(r.flow) }),
+        h('td', {}, h('span', { class: 'tag ' + (r.counted ? 'tag-ok' : 'tag-danger'), text: r.counted ? '计入' : '不计入' })),
+        h('td', { class: 'mono', text: r.counted ? textOf(r.concentration) : '—' }),
+        h('td', { class: 'hint', text: r.dropReason || '' })
+      ]);
+      tb.appendChild(tr);
     });
     return h('table', { class: 'mini-table' }, [
       h('thead', {}, h('tr', {}, [
-        h('th', { text: '时刻' }), h('th', { text: '小时' }), h('th', { text: '数值' }), h('th', { text: '来源' }),
+        h('th', { text: '时刻' }), h('th', { text: '小时' }), h('th', { text: '数值' }), h('th', { text: '来源/状态' }),
         h('th', { text: '标记' }), h('th', { text: '设备' }), h('th', { text: '设备状态' }),
-        h('th', { text: '氧含量' }), h('th', { text: '流量' }), h('th', { text: '是否计入' }), h('th', { text: '接口折算浓度' })
+        h('th', { text: '氧含量' }), h('th', { text: '流量' }), h('th', { text: '是否计入' }),
+        h('th', { text: '折算浓度' }), h('th', { text: '不计入原因' })
       ])),
       tb
     ]);
   }
 
   function dailyRow(d, metric) {
+    var stateBadge;
+    if (!d.valid) stateBadge = h('span', { class: 'tag tag-danger', text: '整日不计' });
+    else if (d.manualHours > 0) stateBadge = h('span', { class: 'tag tag-manual', text: '含手工替代' });
+    else if (d.imputedHours > 0) stateBadge = h('span', { class: 'tag tag-warn', text: '含补录' });
+    else stateBadge = h('span', { class: 'tag tag-ok', text: '正常' });
     return expandableRow([
       h('td', { class: 'nowrap', text: d.day }),
       h('td', { class: 'mono', text: textOf(d.countedHours) }),
-      h('td', { class: 'mono', text: textOf(d.imputedHours) }),
-      h('td', { class: 'mono', text: fmt(d.average) }),
+      h('td', { class: 'mono', text: textOf(d.autoHours) }),
+      h('td', { class: 'mono num-warn', text: textOf(d.imputedHours) }),
+      h('td', { class: 'mono num-manual', text: textOf(d.manualHours) }),
+      h('td', { class: 'mono num-danger', text: textOf(d.invalidHours) }),
+      h('td', { class: 'mono num-danger', text: textOf(d.gapHours) }),
+      h('td', { class: 'mono', text: d.valid ? fmt(d.average) : '—' }),
+      h('td', { class: 'hint', text: d.averageBasis || '' }),
       h('td', { class: 'mono', text: textOf(d.limit) }),
-      h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-      h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
+      h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : (d.valid ? '达标' : '不计') })),
+      h('td', { class: 'mono', text: fmt(d.flowTotal, 1) }),
+      h('td', {}, stateBadge),
+      h('td', { class: 'hint', text: d.invalidReason || '' })
     ], function () {
       var wrap = h('div');
-      wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（共 ' + ((d.rows || []).length) + ' 小时）' }));
+      wrap.appendChild(h('div', { class: 'section-note', text: d.day + ' · ' + metric + ' 逐小时明细（应监测 24 小时；缺口与无效小时显式列出）' }));
       wrap.appendChild(h('div', { class: 'table-wrap' }, hourlyTable(d.rows)));
       return wrap;
     });
@@ -976,7 +1355,10 @@
       ob.appendChild(h('h3', { text: (os.outlet ? (os.outlet.code + ' ' + os.outlet.name) : '排放口') + ' 汇总' }));
       var t = h('table', { class: 'mini-table' }, [
         h('thead', {}, h('tr', {}, [
-          h('th', { text: '指标' }), h('th', { text: '月均' }), h('th', { text: '月总量(吨)' }), h('th', { text: '超标天数' }),
+          h('th', { text: '指标' }), h('th', { text: '月均' }), h('th', { text: '月总量(吨)' }),
+          h('th', { text: '自动(吨)' }), h('th', { text: '补录(吨)' }), h('th', { text: '手工替代(吨)' }),
+          h('th', { text: '手工h' }), h('th', { text: '缺口h' }),
+          h('th', { text: '超标天数' }),
           h('th', { text: '超标小时' }), h('th', { text: '限值' }), h('th', { text: '超标' })
         ])),
         (function () {
@@ -984,7 +1366,13 @@
           (os.rows || []).forEach(function (r) {
             tb.appendChild(h('tr', { class: 'row' }, [
               h('td', { text: r.metric }), h('td', { class: 'mono', text: fmt(r.monthAverage) }),
-              h('td', { class: 'mono', text: fmt(r.monthTotalTons, 4) }), h('td', { class: 'mono', text: textOf(r.exceedDaysCount) }),
+              h('td', { class: 'mono', text: fmt(r.monthTotalTons, 4) }),
+              h('td', { class: 'mono', text: fmt(r.autoTons, 4) }),
+              h('td', { class: 'mono num-warn', text: fmt(r.imputedTons, 4) }),
+              h('td', { class: 'mono num-manual', text: fmt(r.manualTons, 4) }),
+              h('td', { class: 'mono num-manual', text: textOf(r.manualHours) }),
+              h('td', { class: 'mono num-danger', text: textOf(r.gapHours) }),
+              h('td', { class: 'mono', text: textOf(r.exceedDaysCount) }),
               h('td', { class: 'mono', text: textOf(r.exceedHours) }), h('td', { class: 'mono', text: textOf(r.limit) }),
               h('td', {}, h('span', { class: 'tag ' + (r.exceeded ? 'tag-danger' : 'tag-ok'), text: r.exceeded ? '超标' : '达标' }))
             ]));
@@ -1009,18 +1397,25 @@
           if (!series.length) { holder.appendChild(h('div', { class: 'empty', text: '本月没有 ' + m + ' 数据' })); return; }
           var tb = h('tbody');
           series.forEach(function (d) {
-            tb.appendChild(h('tr', { class: 'row' }, [
+            tb.appendChild(h('tr', { class: 'row' + (d.valid ? '' : ' row-gap') }, [
               h('td', { class: 'nowrap', text: d.day }), h('td', { class: 'mono', text: textOf(d.countedHours) }),
-              h('td', { class: 'mono', text: textOf(d.imputedHours) }), h('td', { class: 'mono', text: fmt(d.average) }),
+              h('td', { class: 'mono', text: textOf(d.autoHours) }),
+              h('td', { class: 'mono num-warn', text: textOf(d.imputedHours) }),
+              h('td', { class: 'mono num-manual', text: textOf(d.manualHours) }),
+              h('td', { class: 'mono num-danger', text: textOf(d.gapHours) }),
+              h('td', { class: 'mono', text: d.valid ? fmt(d.average) : '—' }),
               h('td', { class: 'mono', text: textOf(d.limit) }),
-              h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : '达标' })),
-              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) })
+              h('td', {}, h('span', { class: 'tag ' + (d.exceed ? 'tag-danger' : 'tag-ok'), text: d.exceed ? '超标' : (d.valid ? '达标' : '不计') })),
+              h('td', { class: 'mono', text: fmt(d.flowTotal, 1) }),
+              h('td', { class: 'hint', text: d.invalidReason || '' })
             ]));
           });
           holder.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'mini-table' }, [
             h('thead', {}, h('tr', {}, [
-              h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }),
-              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+              h('th', { text: '日期' }), h('th', { text: '计入h' }), h('th', { text: '自动h' }),
+              h('th', { text: '补录h' }), h('th', { text: '手工h' }), h('th', { text: '缺口h' }),
+              h('th', { text: '日均' }), h('th', { text: '限值' }), h('th', { text: '判定' }),
+              h('th', { text: '流量合计' }), h('th', { text: '不计入原因' })
             ])),
             tb
           ])));
@@ -1144,8 +1539,10 @@
       ]),
       h('div', { class: 'table-wrap' }, h('table', { id: 'tableDaily' }, [
         h('thead', {}, h('tr', {}, [
-          h('th', { text: '日期' }), h('th', { text: '有效小时数' }), h('th', { text: '补录小时数' }), h('th', { text: '日均' }),
-          h('th', { text: '限值' }), h('th', { text: '是否超标' }), h('th', { text: '当日流量合计' })
+          h('th', { text: '日期' }), h('th', { text: '计入h' }), h('th', { text: '自动h' }),
+          h('th', { text: '补录h' }), h('th', { text: '手工替代h' }), h('th', { text: '无效h' }), h('th', { text: '缺口h' }),
+          h('th', { text: '日均' }), h('th', { text: '口径' }), h('th', { text: '限值' }),
+          h('th', { text: '判定' }), h('th', { text: '流量合计' }), h('th', { text: '日状态' }), h('th', { text: '不计入原因' })
         ])),
         dailyTb
       ]))
@@ -1178,6 +1575,9 @@
       { name: 'oxygenBaseline', label: '基准氧含量', type: 'number' },
       { name: 'rangeMax', label: '量程上限', type: 'number' },
       { name: 'maxImputeHoursPerDay', label: '单日补录上限（小时）', type: 'number' },
+      { name: 'maxManualSpanHours', label: '单次故障/送检最长替代小时数', type: 'number' },
+      { name: 'manualMinSamplesPerDay', label: '替代日每日最少手工监测次数', type: 'number' },
+      { name: 'manualMaxCoverageRatio', label: '单月手工替代比例上限（0–1）', type: 'number', step: '0.05' },
       { name: 'codDailyLimit', label: 'COD 日限值', type: 'number' },
       { name: 'ammoniaDailyLimit', label: '氨氮日限值', type: 'number' },
       { name: 'hourlyExceedCountLimit', label: '小时超标次数', type: 'number' },

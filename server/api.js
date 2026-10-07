@@ -21,8 +21,11 @@ function withData(handler) {
 }
 
 function currentMonth(data) {
-  const months = Array.from(new Set(data.readings.map((r) => store.monthOf(r.at)))).sort();
-  return months.length ? months[months.length - 1] : store.nowText().slice(0, 7);
+  const stamps = data.readings.map((r) => r.at)
+    .concat((data.manualReadings || []).map((m) => m.at))
+    .concat((data.outages || []).map((o) => o.endAt));
+  stamps.sort();
+  return stamps.length ? store.monthOf(stamps[stamps.length - 1]) : store.nowText().slice(0, 7);
 }
 
 function overview(data) {
@@ -46,6 +49,19 @@ function overview(data) {
     autoCount: data.readings.filter((r) => r.source === '自动').length,
     imputedCount: data.readings.filter((r) => r.source === '补录').length,
     invalidFlagCount: data.readings.filter((r) => r.flag !== '有效').length,
+    outageCount: (data.outages || []).length,
+    manualCount: (data.manualReadings || []).length,
+    reviewedManualCount: (data.manualReadings || []).filter((m) => m.status === '已复核').length,
+    pendingManualCount: (data.manualReadings || []).filter((m) => m.status === '待复核').length,
+    rejectedManualCount: (data.manualReadings || []).filter((m) => m.status === '驳回').length,
+    gapHours: data.outlets.reduce((acc, o) => {
+      ['COD', '氨氮'].forEach((metric) => { acc += monitor.timeline(data, o.id, metric, month).gapHours; });
+      return acc;
+    }, 0),
+    manualHours: data.outlets.reduce((acc, o) => {
+      ['COD', '氨氮'].forEach((metric) => { acc += monitor.timeline(data, o.id, metric, month).manualHours; });
+      return acc;
+    }, 0),
     reportCount: data.reports.length,
     submittedReportCount: data.reports.filter((r) => r.status === '已上报').length,
     exceededOutletCount: outletRows.filter((s) => s.rows.some((r) => r.exceeded)).length,
@@ -57,6 +73,9 @@ function overview(data) {
       oxygenBaseline: Number(settings.oxygenBaseline),
       rangeMax: Number(settings.rangeMax),
       maxImputeHoursPerDay: Number(settings.maxImputeHoursPerDay),
+      maxManualSpanHours: Number(settings.maxManualSpanHours),
+      manualMinSamplesPerDay: Number(settings.manualMinSamplesPerDay),
+      manualMaxCoverageRatio: Number(settings.manualMaxCoverageRatio),
       codDailyLimit: Number(settings.codDailyLimit),
       ammoniaDailyLimit: Number(settings.ammoniaDailyLimit),
       hourlyExceedCountLimit: Number(settings.hourlyExceedCountLimit),
@@ -123,6 +142,23 @@ router.get('/readings', withData((data, req) => res.listReadings(data, req.query
 router.post('/readings', withData((data, req) => ({ __save: true, __body: res.createReading(data, req.body || {}) })));
 router.patch('/readings/:id', withData((data, req) => ({ __save: true, __body: res.updateReading(data, req.params.id, req.body || {}) })));
 router.delete('/readings/:id', withData((data, req) => ({ __save: true, __body: res.removeReading(data, req.params.id) })));
+
+// 替代取证：设备故障/送检台账
+router.get('/outages', withData((data, req) => res.listOutages(data, req.query)));
+router.post('/outages', withData((data, req) => ({ __save: true, __body: res.createOutage(data, req.body || {}) })));
+router.patch('/outages/:id', withData((data, req) => ({ __save: true, __body: res.updateOutage(data, req.params.id, req.body || {}) })));
+router.delete('/outages/:id', withData((data, req) => ({ __save: true, __body: res.removeOutage(data, req.params.id) })));
+
+// 替代取证：手工监测登记（等效值）与复核
+router.get('/manual-readings', withData((data, req) => res.listManuals(data, req.query)));
+router.post('/manual-readings', withData((data, req) => ({ __save: true, __body: res.createManual(data, req.body || {}) })));
+router.patch('/manual-readings/:id', withData((data, req) => ({ __save: true, __body: res.updateManual(data, req.params.id, req.body || {}) })));
+router.post('/manual-readings/:id/review', withData((data, req) => ({ __save: true, __body: res.reviewManual(data, req.params.id, req.body || {}) })));
+router.delete('/manual-readings/:id', withData((data, req) => ({ __save: true, __body: res.removeManual(data, req.params.id) })));
+
+// 替代取证：某排放口某月的覆盖边界与缺口报告
+router.get('/outlets/:id/coverage', withData((data, req) =>
+  monitor.coverageReport(data, req.params.id, req.query.month || currentMonth(data))));
 
 router.get('/reports', withData((data, req) => res.listReports(data, req.query)));
 router.post('/reports', withData((data, req) => ({ __save: true, __body: res.createReport(data, req.body || {}) })));
