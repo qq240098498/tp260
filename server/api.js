@@ -45,18 +45,28 @@ function overview(data) {
     readingCount: data.readings.length,
     autoCount: data.readings.filter((r) => r.source === '自动').length,
     imputedCount: data.readings.filter((r) => r.source === '补录').length,
+    manualCount: (data.manualRecords || []).filter((r) => r.reviewStatus === '已复核').length,
+    manualPendingCount: (data.manualRecords || []).filter((r) => r.reviewStatus === '待复核').length,
+    outageCount: (data.deviceOutages || []).length,
     invalidFlagCount: data.readings.filter((r) => r.flag !== '有效').length,
     reportCount: data.reports.length,
     submittedReportCount: data.reports.filter((r) => r.status === '已上报').length,
     exceededOutletCount: outletRows.filter((s) => s.rows.some((r) => r.exceeded)).length,
     accumulatedCodTons: monitor.accumulatedTons(data, 'COD'),
     accumulatedAmmoniaTons: monitor.accumulatedTons(data, '氨氮'),
+    accumulatedCodManualTons: monitor.accumulatedParts(data, 'COD').manualTons,
+    accumulatedAmmoniaManualTons: monitor.accumulatedParts(data, '氨氮').manualTons,
     permitCodTons: Number(settings.annualPermitCodTons),
     permitAmmoniaTons: Number(settings.annualPermitAmmoniaTons),
     settings: {
       oxygenBaseline: Number(settings.oxygenBaseline),
       rangeMax: Number(settings.rangeMax),
       maxImputeHoursPerDay: Number(settings.maxImputeHoursPerDay),
+      validHoursPerDay: Number(settings.validHoursPerDay),
+      manualMinSamplesPerDay: Number(settings.manualMinSamplesPerDay),
+      manualMaxConsecutiveDays: Number(settings.manualMaxConsecutiveDays),
+      manualMaxCoveragePercent: Number(settings.manualMaxCoveragePercent),
+      manualFlowLookbackDays: Number(settings.manualFlowLookbackDays),
       codDailyLimit: Number(settings.codDailyLimit),
       ammoniaDailyLimit: Number(settings.ammoniaDailyLimit),
       hourlyExceedCountLimit: Number(settings.hourlyExceedCountLimit),
@@ -123,6 +133,18 @@ router.get('/readings', withData((data, req) => res.listReadings(data, req.query
 router.post('/readings', withData((data, req) => ({ __save: true, __body: res.createReading(data, req.body || {}) })));
 router.patch('/readings/:id', withData((data, req) => ({ __save: true, __body: res.updateReading(data, req.params.id, req.body || {}) })));
 router.delete('/readings/:id', withData((data, req) => ({ __save: true, __body: res.removeReading(data, req.params.id) })));
+
+router.get('/outages', withData((data, req) => res.listOutages(data, req.query)));
+router.post('/outages', withData((data, req) => ({ __save: true, __body: res.createOutage(data, req.body || {}) })));
+router.patch('/outages/:id', withData((data, req) => ({ __save: true, __body: res.updateOutage(data, req.params.id, req.body || {}) })));
+router.delete('/outages/:id', withData((data, req) => ({ __save: true, __body: res.removeOutage(data, req.params.id) })));
+
+router.get('/manual-records', withData((data, req) => res.listManualRecords(data, req.query)));
+router.post('/manual-records', withData((data, req) => ({ __save: true, __body: res.createManual(data, req.body || {}) })));
+router.get('/manual-records/:id', withData((data, req) => res.manualDetail(data, req.params.id)));
+router.patch('/manual-records/:id', withData((data, req) => ({ __save: true, __body: res.updateManual(data, req.params.id, req.body || {}) })));
+router.post('/manual-records/:id/review', withData((data, req) => ({ __save: true, __body: res.reviewManual(data, req.params.id, req.body || {}) })));
+router.delete('/manual-records/:id', withData((data, req) => ({ __save: true, __body: res.removeManual(data, req.params.id) })));
 
 router.get('/reports', withData((data, req) => res.listReports(data, req.query)));
 router.post('/reports', withData((data, req) => ({ __save: true, __body: res.createReport(data, req.body || {}) })));

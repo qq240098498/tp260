@@ -7,9 +7,14 @@ const OUTLET_STATUS = ['运行', '停用'];
 const OUTLET_TYPE = ['主要排放口', '一般排放口'];
 const DEVICE_STATUS = ['正常', '校准', '维护', '故障'];
 const METRICS = ['COD', '氨氮', '流量', '氧含量'];
+const MANUAL_METRICS = ['COD', '氨氮']; // 手工替代取证只针对污染物浓度
 const FLAGS = ['有效', '无效'];
 const SOURCES = ['自动', '补录'];
+const OUTAGE_REASONS = ['故障', '送检', '维护'];
+const REVIEW_STATUS = ['待复核', '已复核', '复核退回'];
 const REPORT_STATUS = ['草稿', '已上报', '退回'];
+
+const AT_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/;
 
 function decoratePlant(data, plant, month) {
   const outlets = monitor.outletsOf(data, plant.id);
@@ -239,12 +244,35 @@ function removeDevice(data, id) {
 
 function listReadings(data, query) {
   const q = query || {};
-  const rows = monitor.readingsOf(data, q);
+  let rows = monitor.readingsOf(data, q);
+  if (q.flag) rows = rows.filter((r) => r.flag === q.flag);
+  // 复核状态是手工记录的属性：一旦按复核状态筛选，自动读数不参与
+  if (q.reviewStatus) rows = [];
+  if (q.source === '手工替代') rows = [];
+  else if (q.source) rows = rows.filter((r) => r.source === q.source);
   const limit = Number(q.limit) > 0 ? Number(q.limit) : 500;
+  const autoRows = rows.slice(0, limit).map((r) => decorateReading(data, r));
+
+  // 手工监测记录与自动读数在同一张清单里区分展示（可按来源、复核状态筛选）
+  let manualRows = [];
+  if (q.source !== '自动' && q.source !== '补录') {
+    const mq = {
+      outletId: q.outletId, deviceId: q.deviceId, metric: q.metric,
+      day: q.day, month: q.month, reviewStatus: q.reviewStatus,
+    };
+    const cap = q.source === '手工替代' ? limit : Math.max(limit - autoRows.length, 0);
+    manualRows = monitor.manualRecordsOf(data, mq).slice(0, cap).map((r) => decorateManual(data, r));
+  }
+  const all = autoRows.concat(manualRows).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).slice(0, limit);
+  const manualTotal = monitor.manualRecordsOf(data, {
+    outletId: q.outletId, deviceId: q.deviceId, metric: q.metric, day: q.day, month: q.month, reviewStatus: q.reviewStatus,
+  }).length;
   return {
-    total: rows.length,
-    returned: Math.min(rows.length, limit),
-    rows: rows.slice(0, limit).map((r) => decorateReading(data, r)),
+    total: rows.length + manualTotal,
+    returned: all.length,
+    autoCount: autoRows.length,
+    manualCount: manualRows.length,
+    rows: all,
   };
 }
 
@@ -252,13 +280,35 @@ function decorateReading(data, row) {
   const device = monitor.deviceOf(data, row.deviceId);
   const outlet = monitor.outletOf(data, row.outletId);
   return Object.assign({}, row, {
+    rowKind: 'auto',
     deviceCode: device ? device.code : '',
     deviceStatus: device ? device.status : '',
     outletCode: outlet ? outlet.code : '',
-    counted: monitor.isCounted(row, device, data.settings),
-    concentration: monitor.effectiveConcentration(row, data.settings),
-    oxygen: monitor.oxygenAt(data, row),
-    flow: monitor.flowAt(data, row),
+    counted: monitor.isCounted(data, row, device),
+    concentration: monitor.effectiveConcentration(data, row.value, row.outletId, row.at),
+    oxygen: monitor.oxygenAt(data, row.outletId, row.at),
+    flow: monitor.flowAt(data, row.outletId, row.at),
+    reviewStatus: '',
+  });
+}
+
+function decorateManual(data, row) {
+  const device = monitor.deviceOf(data, row.deviceId);
+  const outlet = monitor.outletOf(data, row.outletId);
+  const outage = monitor.outageAt(data, row.deviceId, row.at);
+  return Object.assign({}, row, {
+    rowKind: 'manual',
+    source: '手工替代',
+    deviceCode: device ? device.code : '',
+    deviceStatus: device ? device.status : '',
+    outletCode: outlet ? outlet.code : '',
+    flag: '有效',
+    counted: row.reviewStatus === '已复核' && !!outage,
+    concentration: monitor.effectiveConcentration(data, row.value, row.outletId, row.at),
+    oxygen: monitor.oxygenAt(data, row.outletId, row.at),
+    flow: monitor.flowAt(data, row.outletId, row.at),
+    outageId: outage ? outage.id : '',
+    outageReason: outage ? outage.reason : '',
   });
 }
 
@@ -310,6 +360,225 @@ function removeReading(data, id) {
   const reading = data.readings.find((r) => r.id === id);
   if (!reading) throw new AppError(404, 'READING_NOT_FOUND', '这条监测数据不存在');
   data.readings = data.readings.filter((r) => r.id !== id);
+  return { removed: id };
+}
+
+/* ================= 设备故障/送检时段登记 ================= */
+
+function decorateOutage(data, o) {
+  const device = monitor.deviceOf(data, o.deviceId);
+  const outlet = monitor.outletOf(data, o.outletId);
+  const records = monitor.manualRecordsOf(data, { deviceId: o.deviceId });
+  const inPeriod = records.filter((r) => r.at >= o.startAt && r.at <= o.endAt);
+  return Object.assign({}, o, {
+    deviceCode: device ? device.code : '',
+    outletCode: outlet ? outlet.code : '',
+    outletName: outlet ? outlet.name : '',
+    metric: device ? device.metric : '',
+    manualCount: inPeriod.length,
+    reviewedCount: inPeriod.filter((r) => r.reviewStatus === '已复核').length,
+    pendingCount: inPeriod.filter((r) => r.reviewStatus === '待复核').length,
+  });
+}
+
+function listOutages(data, query) {
+  const q = query || {};
+  const filter = {
+    deviceId: q.deviceId,
+    outletId: q.outletId,
+    intersectStart: q.from || undefined,
+    intersectEnd: q.to || undefined,
+  };
+  let rows = monitor.outagesOf(data, filter);
+  if (q.reason) rows = rows.filter((o) => o.reason === q.reason);
+  return rows.map((o) => decorateOutage(data, o));
+}
+
+function validateOutage(data, payload, current) {
+  const merged = Object.assign({}, current || {}, payload || {});
+  const errors = {};
+  if (!data.devices.some((d) => d.id === merged.deviceId)) errors.deviceId = '监测设备不存在';
+  else {
+    const device = data.devices.find((d) => d.id === merged.deviceId);
+    if (merged.outletId && merged.outletId !== device.outletId) errors.outletId = '排放口与设备所属排放口不一致';
+  }
+  if (!OUTAGE_REASONS.includes(merged.reason)) errors.reason = '原因只能是：' + OUTAGE_REASONS.join('、');
+  if (!AT_RE.test(String(merged.startAt || ''))) errors.startAt = '开始时刻要像 2026-09-16 00:00:00';
+  if (!AT_RE.test(String(merged.endAt || ''))) errors.endAt = '结束时刻要像 2026-09-21 23:00:00';
+  if (!errors.startAt && !errors.endAt && String(merged.endAt) <= String(merged.startAt)) errors.endAt = '结束时刻必须晚于开始时刻';
+  if (!String(merged.registeredBy || '').trim()) errors.registeredBy = '登记人不能为空';
+  if (Object.keys(errors).length) throw new AppError(400, 'VALIDATION_FAILED', '这段设备时段没通过校验', errors);
+  // 同一设备时段不许重叠
+  const clash = (data.deviceOutages || []).find((o) => o.deviceId === merged.deviceId && o.id !== (current ? current.id : null)
+    && !(String(merged.endAt) < o.startAt || String(merged.startAt) > o.endAt));
+  if (clash) throw new AppError(409, 'OUTAGE_OVERLAP', '与该设备已登记的另一段故障/送检时段重叠', { clashWith: clash.id, startAt: clash.startAt, endAt: clash.endAt });
+}
+
+function createOutage(data, payload) {
+  validateOutage(data, payload, null);
+  const device = data.devices.find((d) => d.id === payload.deviceId);
+  const outage = {
+    id: store.nextId('ot', data.deviceOutages),
+    deviceId: payload.deviceId,
+    outletId: device.outletId,
+    reason: payload.reason,
+    startAt: String(payload.startAt),
+    endAt: String(payload.endAt),
+    registeredBy: String(payload.registeredBy).trim(),
+    registeredAt: String(payload.registeredAt || store.nowText()),
+    remark: String(payload.remark || ''),
+  };
+  data.deviceOutages.push(outage);
+  return decorateOutage(data, outage);
+}
+
+function updateOutage(data, id, payload) {
+  const outage = data.deviceOutages.find((o) => o.id === id);
+  if (!outage) throw new AppError(404, 'OUTAGE_NOT_FOUND', '这段设备时段不存在');
+  validateOutage(data, payload, outage);
+  Object.assign(outage, {
+    reason: payload.reason || outage.reason,
+    startAt: payload.startAt ? String(payload.startAt) : outage.startAt,
+    endAt: payload.endAt ? String(payload.endAt) : outage.endAt,
+    registeredBy: payload.registeredBy ? String(payload.registeredBy).trim() : outage.registeredBy,
+    remark: payload.remark === undefined ? outage.remark : String(payload.remark),
+  });
+  return decorateOutage(data, outage);
+}
+
+function removeOutage(data, id) {
+  const outage = data.deviceOutages.find((o) => o.id === id);
+  if (!outage) throw new AppError(404, 'OUTAGE_NOT_FOUND', '这段设备时段不存在');
+  data.deviceOutages = data.deviceOutages.filter((o) => o.id !== id);
+  return { removed: id };
+}
+
+/* ================= 手工监测（替代取证）记录 ================= */
+
+function listManualRecords(data, query) {
+  const q = query || {};
+  return monitor.manualRecordsOf(data, q).map((r) => decorateManual(data, r));
+}
+
+function manualDetail(data, id) {
+  const row = (data.manualRecords || []).find((r) => r.id === id);
+  if (!row) throw new AppError(404, 'MANUAL_NOT_FOUND', '这条手工监测记录不存在');
+  return decorateManual(data, row);
+}
+
+function validateManual(data, payload, current) {
+  const merged = Object.assign({}, current || {}, payload || {});
+  const errors = {};
+  const device = data.devices.find((d) => d.id === merged.deviceId);
+  if (!data.outlets.some((o) => o.id === merged.outletId)) errors.outletId = '排放口不存在';
+  if (!device) errors.deviceId = '监测设备不存在';
+  else if (merged.outletId && merged.outletId !== device.outletId) errors.deviceId = '设备不属于该排放口';
+  if (!MANUAL_METRICS.includes(merged.metric)) errors.metric = '手工替代监测指标只能是：' + MANUAL_METRICS.join('、');
+  else if (device && device.metric !== merged.metric) errors.metric = '指标与该设备监测指标不一致';
+  if (!AT_RE.test(String(merged.at || ''))) errors.at = '采样时刻要像 2026-09-16 08:30:00';
+  if (merged.value === undefined || merged.value === '' || !Number.isFinite(Number(merged.value))) errors.value = '监测结果数值不能为空且必须是数字';
+  if (!String(merged.method || '').trim()) errors.method = '监测方法（含标准号）不能为空';
+  if (merged.detectLimit === undefined || merged.detectLimit === '' || !Number.isFinite(Number(merged.detectLimit)) || Number(merged.detectLimit) < 0) errors.detectLimit = '检出限必须是不小于 0 的数字';
+  if (!String(merged.resultUnit || '').trim()) errors.resultUnit = '结果单位不能为空';
+  if (!String(merged.labName || '').trim()) errors.labName = '监测单位（实验室）不能为空';
+  if (!String(merged.evidenceNo || '').trim()) errors.evidenceNo = '监测报告/原始记录编号不能为空';
+  if (!String(merged.sampledBy || '').trim()) errors.sampledBy = '采样人不能为空';
+  if (!String(merged.registeredBy || '').trim()) errors.registeredBy = '登记人不能为空';
+  if (Object.keys(errors).length) throw new AppError(400, 'VALIDATION_FAILED', '这条手工监测记录缺少入账依据', errors);
+  // 采样时刻必须落在该设备已登记的故障/送检时段内
+  const outage = (data.deviceOutages || []).find((o) => o.deviceId === merged.deviceId && String(merged.at) >= o.startAt && String(merged.at) <= o.endAt);
+  if (!outage) {
+    throw new AppError(409, 'NO_OUTAGE_WINDOW', '采样时刻不在该设备已登记的故障/送检时段内，没有替代取证依据，不许入账', {
+      at: merged.at, deviceId: merged.deviceId,
+    });
+  }
+  return outage;
+}
+
+function createManual(data, payload) {
+  const outage = validateManual(data, payload, null);
+  const record = {
+    id: store.nextId('mr', data.manualRecords),
+    outletId: payload.outletId,
+    deviceId: payload.deviceId,
+    metric: payload.metric,
+    at: String(payload.at),
+    value: Number(payload.value),
+    method: String(payload.method).trim(),
+    detectLimit: Number(payload.detectLimit),
+    resultUnit: String(payload.resultUnit).trim(),
+    labName: String(payload.labName).trim(),
+    evidenceNo: String(payload.evidenceNo).trim(),
+    sampledBy: String(payload.sampledBy).trim(),
+    reviewStatus: '待复核',
+    reviewedBy: '',
+    reviewedAt: '',
+    registeredBy: String(payload.registeredBy).trim(),
+    registeredAt: String(payload.registeredAt || store.nowText()),
+    remark: String(payload.remark || ''),
+    outageId: outage.id,
+  };
+  data.manualRecords.push(record);
+  return decorateManual(data, record);
+}
+
+function updateManual(data, id, payload) {
+  const record = data.manualRecords.find((r) => r.id === id);
+  if (!record) throw new AppError(404, 'MANUAL_NOT_FOUND', '这条手工监测记录不存在');
+  if (record.reviewStatus === '已复核') {
+    throw new AppError(409, 'MANUAL_REVIEWED_LOCKED', '已复核的手工记录已作为等效值入账，不能直接修改；如需更正请先由复核人退回', { id });
+  }
+  validateManual(data, payload, record);
+  Object.assign(record, {
+    outletId: payload.outletId || record.outletId,
+    deviceId: payload.deviceId || record.deviceId,
+    metric: payload.metric || record.metric,
+    at: payload.at ? String(payload.at) : record.at,
+    value: payload.value === undefined ? record.value : Number(payload.value),
+    method: payload.method === undefined ? record.method : String(payload.method).trim(),
+    detectLimit: payload.detectLimit === undefined ? record.detectLimit : Number(payload.detectLimit),
+    resultUnit: payload.resultUnit === undefined ? record.resultUnit : String(payload.resultUnit).trim(),
+    labName: payload.labName === undefined ? record.labName : String(payload.labName).trim(),
+    evidenceNo: payload.evidenceNo === undefined ? record.evidenceNo : String(payload.evidenceNo).trim(),
+    sampledBy: payload.sampledBy === undefined ? record.sampledBy : String(payload.sampledBy).trim(),
+    registeredBy: payload.registeredBy === undefined ? record.registeredBy : String(payload.registeredBy).trim(),
+    remark: payload.remark === undefined ? record.remark : String(payload.remark),
+  });
+  const outage = validateManual(data, record, record);
+  record.outageId = outage.id;
+  return decorateManual(data, record);
+}
+
+function reviewManual(data, id, payload) {
+  const record = data.manualRecords.find((r) => r.id === id);
+  if (!record) throw new AppError(404, 'MANUAL_NOT_FOUND', '这条手工监测记录不存在');
+  const action = payload && payload.action ? String(payload.action) : (record.reviewStatus === '待复核' ? 'approve' : record.reviewStatus === '已复核' ? 'reject' : 'approve');
+  const errors = {};
+  if (!['approve', 'reject'].includes(action)) errors.action = '复核动作只能是 approve / reject';
+  if (!String((payload || {}).reviewedBy || '').trim()) errors.reviewedBy = '复核人不能为空';
+  if (action === 'approve' && String((payload || {}).reviewedBy).trim() === String(record.sampledBy)) {
+    errors.reviewedBy = '复核人不能与采样人为同一人';
+  }
+  if (Object.keys(errors).length) throw new AppError(400, 'VALIDATION_FAILED', '复核没通过校验', errors);
+  if (action === 'approve') {
+    record.reviewStatus = '已复核';
+    record.reviewedBy = String(payload.reviewedBy).trim();
+    record.reviewedAt = String(payload.reviewedAt || store.nowText());
+  } else {
+    record.reviewStatus = '复核退回';
+    record.reviewedBy = String(payload.reviewedBy).trim();
+    record.reviewedAt = String(payload.reviewedAt || store.nowText());
+  }
+  return decorateManual(data, record);
+}
+
+function removeManual(data, id) {
+  const record = data.manualRecords.find((r) => r.id === id);
+  if (!record) throw new AppError(404, 'MANUAL_NOT_FOUND', '这条手工监测记录不存在');
+  if (record.reviewStatus === '已复核') {
+    throw new AppError(409, 'MANUAL_REVIEWED_LOCKED', '已复核的手工记录已作为等效值入账，不能删除；如需更正请先退回', { id });
+  }
+  data.manualRecords = data.manualRecords.filter((r) => r.id !== id);
   return { removed: id };
 }
 
@@ -369,6 +638,9 @@ module.exports = {
   listOutlets, createOutlet, updateOutlet, removeOutlet,
   listDevices, createDevice, updateDevice, removeDevice,
   listReadings, createReading, updateReading, removeReading, decorateReading,
+  listOutages, createOutage, updateOutage, removeOutage, decorateOutage,
+  listManualRecords, manualDetail, createManual, updateManual, reviewManual, removeManual, decorateManual,
   listReports, reportDetail, createReport, updateReport,
-  PLANT_STATUS, OUTLET_STATUS, OUTLET_TYPE, DEVICE_STATUS, METRICS, FLAGS, SOURCES, REPORT_STATUS,
+  PLANT_STATUS, OUTLET_STATUS, OUTLET_TYPE, DEVICE_STATUS, METRICS, MANUAL_METRICS, FLAGS, SOURCES,
+  OUTAGE_REASONS, REVIEW_STATUS, REPORT_STATUS,
 };

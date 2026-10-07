@@ -17,12 +17,18 @@ const DEFAULT_SETTINGS = {
   annualPermitAmmoniaTons: 1.8,
   permitYearStart: '2026-01-01',
   tonsDivisor: 1000000000,
+  // 手工替代取证口径
+  validHoursPerDay: 18,        // 单日有效（自动+替代）小时最低门槛
+  manualMinSamplesPerDay: 4,   // 手工替代日每个指标每日最少监测次数
+  manualMaxConsecutiveDays: 5, // 一次设备故障/送检连续替代最长天数（超出按缺口处理）
+  manualMaxCoveragePercent: 80, // 手工替代小时数占当月应测小时数比例上限
+  manualFlowLookbackDays: 7    // 替代期间流量缺失时，用故障前 N 个有效日均流量推算
 };
 
 function normalize(raw) {
   const data = raw && typeof raw === 'object' ? raw : {};
   data.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings || {});
-  for (const key of ['plants', 'outlets', 'devices', 'readings', 'reports']) {
+  for (const key of ['plants', 'outlets', 'devices', 'readings', 'reports', 'deviceOutages', 'manualRecords']) {
     if (!Array.isArray(data[key])) data[key] = [];
   }
   return data;
